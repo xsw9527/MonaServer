@@ -80,6 +80,7 @@ public:
 	// To write audio or video packet
 	virtual void write(BinaryWriter& writer,UInt8 track,UInt32 time,const UInt8* data,UInt32 size);
 
+	void write(BinaryWriter& writer, UInt8 track, UInt32 time, const UInt8* data, UInt32 bytesWritten,UInt32 bytesToBeWrite,int total);
 	void writeRTCP(BinaryWriter& writer,UInt8 type,UInt32 time);
 
 private:

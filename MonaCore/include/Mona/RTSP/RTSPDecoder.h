@@ -31,6 +31,8 @@ public:
 
 private:
 	UInt32 decoding(Exception& ex, UInt8* data,UInt32 size) {
+		if (data[0] == 0x24)//ignore rtp over tcp packets
+			return 0;
 		std::shared_ptr<RTSPPacket>	pPacket(new RTSPPacket(_rootPath));
 		UInt32 consumed = pPacket->build(ex, data, size);
 		if (consumed)

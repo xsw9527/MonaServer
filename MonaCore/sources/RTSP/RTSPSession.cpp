@@ -152,15 +152,16 @@ void RTSPSession::processDescribe(const shared_ptr<RTSPPacket>& pPacket) {
 		// TODO : subscribe here and get media parameters dinamycally
 
 		 // media audio
-		writer.write("m=audio 0 RTP/AVP 14\r\n"); // description
-		writer.write("a=rtpmap:14 MPA/22050/1\r\n"); // description
-		writer.write("a=control:trackID=1\r\n"); // id
-		/*writer.write("m=audio 0 RTP/AVP 98\r\n"); // description
-		writer.write("a=rtpmap:98 speex/8000\r\n"); // description
-		*/
+		writer.write("m=audio 0 RTP/AVP 96\r\n"); // description
+		writer.write("b=AS:125\r\n"); // description
+		writer.write("a=rtpmap:96 mpeg4-generic/44100/2\r\n"); // description
+		writer.write("a=fmtp:96 streamtype=5;profile-level-id=1;mode=AAC-hbr;sizelength=13;indexlength=3;indexdeltalength=3;config=1210;Profile=1;\r\n"); // description
+		writer.write("a=control:trackID=1\r\n"); // id		
+
 		 // media video
 		writer.write("m=video 0 RTP/AVP 97\r\n");
 		writer.write("a=rtpmap:97 H264/90000\r\n"); // description
+		writer.write("a=fmtp:97 packetization-mode=1;profile-level-id=640028\r\n");
 		writer.write("a=control:trackID=2\r\n");
 	}
 }
@@ -168,24 +169,40 @@ void RTSPSession::processDescribe(const shared_ptr<RTSPPacket>& pPacket) {
 void RTSPSession::processSetup(Exception& ex, const shared_ptr<RTSPPacket>& pPacket) {
 
 	const char* clientPort = NULL;
+	const char* interleaved = NULL;
 	const char* test = pPacket->headers["Transport"];
+	int rtpOverTcp = 0;
 	if (!pPacket->trackID) {
 		ex.set(Exception::APPLICATION, "SETUP request without trackID");
-	} else if(!pPacket->headers["Transport"] || !(clientPort = strstr(pPacket->headers["Transport"],"client_port="))) {
+	} else if(!pPacket->headers["Transport"] ||( !(clientPort = strstr(pPacket->headers["Transport"],"client_port="))&&\
+						!strstr(pPacket->headers["Transport"], "interleaved="))) {
+
 		ex.set(Exception::APPLICATION, "SETUP request without Transport or client_port");
 	} else {
+		if (interleaved = strstr(pPacket->headers["Transport"], "interleaved=")){
+
+			rtpOverTcp = 1;
+		}
+			
 		UInt32 rtpPort = 0,rtcpPort = 0;
+		UInt32 interleaveStart = 0, interleaveEnd = 0;
 		UInt32 srtpPort = 0,srtcpPort = 0;
-		sscanf(clientPort, "client_port=%d-%d", &rtpPort, &rtcpPort);
-		if(pPacket->trackID==1)
-			_writer.initAudio(ex, rtpPort, rtcpPort, srtpPort, srtcpPort);
+		if (!rtpOverTcp)
+			sscanf(clientPort, "client_port=%d-%d", &rtpPort, &rtcpPort);
 		else
-			_writer.initVideo(ex, rtpPort, rtcpPort, srtpPort, srtcpPort);
+			sscanf(interleaved, "interleaved=%d-%d", &interleaveStart, &interleaveEnd);
+		if(pPacket->trackID==1)
+			_writer.initAudio(ex, rtpPort, rtcpPort, srtpPort, srtcpPort, interleaveStart, interleaveEnd, rtpOverTcp);
+		else
+			_writer.initVideo(ex, rtpPort, rtcpPort, srtpPort, srtcpPort, interleaveStart, interleaveEnd, rtpOverTcp);
 
 		string buffer;
 		HTTP_BEGIN_HEADER(_writer.writeResponse(200).packet)
-			String::Format(buffer, "RTP/AVP;unicast;client_port=", rtpPort, '-', rtcpPort, 
-				";server_port=", srtpPort, '-', srtcpPort, ";ssrc=", (pPacket->trackID == 1)? _writer.audioSSRC : _writer.videoSSRC);
+			if (!rtpOverTcp)
+				String::Format(buffer, "RTP/AVP;unicast;client_port=", rtpPort, '-', rtcpPort, 
+					";server_port=", srtpPort, '-', srtcpPort, ";ssrc=", (pPacket->trackID == 1)? _writer.audioSSRC : _writer.videoSSRC);
+			else
+				String::Format(buffer, "RTP/AVP/TCP;unicast;interleaved=", interleaveStart, '-', interleaveEnd, ";ssrc=", (pPacket->trackID == 1) ? _writer.audioSSRC : _writer.videoSSRC);
 			HTTP_ADD_HEADER("Transport", buffer)
 			HTTP_ADD_HEADER("Session", String::Format(buffer, id(), ";timeout=", invoker.getNumber<UInt16>("RTSP.timeout")))
 		HTTP_END_HEADER

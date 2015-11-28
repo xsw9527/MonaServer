@@ -90,7 +90,10 @@ DataWriter& RTSPSender::writeResponse(const char* code, bool rawWithoutLength) {
 
 	return write(code, HTTP::CONTENT_APPLICATON, "dsp", NULL, 0); // DESCRIBE response (application/dsp)
 }
+void RTSPSender::initSender(){
+	_pWriter.reset(new StringWriter(_poolBuffers));
 
+}
 DataWriter& RTSPSender::write(const char* code, HTTP::ContentType type, const char* subType, const UInt8* data, UInt32 size) {
 	if (_pWriter) {
 		ERROR("HTTP response already written");

@@ -20,7 +20,7 @@ This file is a part of Mona.
 #include "Mona/RTSP/RTSPWriter.h"
 #include "Mona/HTTP/HTTP.h"
 #include "Mona/Logs.h"
-
+#include "Mona/SubstreamMap.h"
 using namespace std;
 
 namespace Mona {
@@ -28,13 +28,22 @@ namespace Mona {
 RTSPWriter::RTSPWriter(TCPSession& session) : _requestCount(0),_requesting(false),_session(session),_pThread(NULL),Writer(session.peer.connected ? OPENED : OPENING),
 	audioSSRC("2783EE43"),videoSSRC("4D7C7FFD"), _portAudioRTP(0),_portAudioRTCP(0),_portVideoRTP(0),_portVideoRTCP(0),
 	_sportAudioRTP(0),_sportAudioRTCP(0),_sportVideoRTP(0),_sportVideoRTCP(0) {
+	_rtpOverTcp = 0;
 }
 
-void RTSPWriter::initAudio(Exception& ex, UInt32 rtpPort,UInt32 rtcpPort, UInt32& srtpPort, UInt32& srtcpPort) {
+void RTSPWriter::initAudio(Exception& ex, UInt32 rtpPort,UInt32 rtcpPort, UInt32& srtpPort, UInt32& srtcpPort,\
+					int audioRtpInterleaved,int audioRtcpInterleaved,int rtpOverTcp) {
+	if (rtpOverTcp){
+		_rtpOverTcp = rtpOverTcp;
+		INFO("Using rtp over tcp\n");
+		return;
+	}
 	_portAudioRTP = rtpPort;
 	_portAudioRTCP = rtcpPort;
 	_sportAudioRTP = srtpPort = 6970; // TODO : get server ports dynamically (+config?)
 	_sportAudioRTCP = srtcpPort = 6971;
+	_audioRtpInterleavedValue = audioRtpInterleaved;
+	_audioRtcpInterleavedValue = audioRtcpInterleaved;
 	
 	// TODO : create a unique UDPSocket for each RTSPWriter
 	_pSocketAudioRTP.reset(new UDPSocket(_session.invoker.sockets));
@@ -54,11 +63,20 @@ void RTSPWriter::initAudio(Exception& ex, UInt32 rtpPort,UInt32 rtcpPort, UInt32
 	INFO("Client port used for audio : ", rtpPort, "-", rtcpPort)
 }
 
-void RTSPWriter::initVideo(Exception& ex, UInt32 rtpPort,UInt32 rtcpPort, UInt32& srtpPort, UInt32& srtcpPort) {
+void RTSPWriter::initVideo(Exception& ex, UInt32 rtpPort, UInt32 rtcpPort, UInt32& srtpPort, UInt32& srtcpPort,\
+							int videoRtpInterleaved, int videoRtcpInterleaved,int rtpOverTcp) {
+	if (rtpOverTcp){
+		_rtpOverTcp = rtpOverTcp;
+		INFO("Using rtp over tcp\n");
+		return;
+	}
 	_portVideoRTP = rtpPort;
 	_portVideoRTCP = rtcpPort;
 	_sportVideoRTP = srtpPort = 6972; // TODO : get server ports dynamically (+config?)
 	_sportVideoRTCP = srtcpPort = 6973;
+
+	_videoRtpInterleavedValue = videoRtpInterleaved;
+	_videoRtcpInterleavedValue = videoRtcpInterleaved;
 
 	// TODO : create a unique UDPSocket for each RTSPWriter
 	_pSocketVideoRTP.reset(new UDPSocket(_session.invoker.sockets));
@@ -120,10 +138,6 @@ void RTSPWriter::endRequest() {
 	flush();
 }
 
-RTPSender* RTSPWriter::createRTPSender(RTPSender::RtpType type, UInt16 port) {
-	_RTPsenders.emplace_back(new RTPSender(_session.invoker.poolBuffers, type, _session.peer.address.host(), port));
-	return &*_RTPsenders.back();
-}
 
 bool RTSPWriter::sendRTP(std::shared_ptr<RTPSender>& pSender) {
 	Exception ex;
@@ -167,6 +181,15 @@ RTSPSender* RTSPWriter::createSender(bool isInternResponse) {
 	return &*_senders.back();
 }
 
+RTSPSender* RTSPWriter::createRTPOverTcpSender() {	
+	_RTPOverTcpsenders.emplace_back(new RTSPSender(_session.peer.address, _pRequest ? *_pRequest : *_pLastRequest, _session.invoker.poolBuffers, _session.peer.path));
+	return &*_RTPOverTcpsenders.back();
+}
+RTPSender* RTSPWriter::createRTPSender(RTPSender::RtpType type, UInt16 port) {
+	_RTPsenders.emplace_back(new RTPSender(_session.invoker.poolBuffers, type, _session.peer.address.host(), port));
+	return &*_RTPsenders.back();
+}
+
 bool RTSPWriter::send(shared_ptr<RTSPSender>& pSender) {
 	Exception ex;
 	if (pSender->newHeaders()) {
@@ -179,6 +202,16 @@ bool RTSPWriter::send(shared_ptr<RTSPSender>& pSender) {
 	if (ex)
 		ERROR("RTSPSender flush, ", ex.error())
 	pSender.reset();
+	return true;
+}
+
+bool RTSPWriter::sendRTPOverTCP(std::shared_ptr<RTSPSender>& pSender)
+{
+	Exception ex;
+	_pThread = _session.send<RTSPSender>(ex, qos(), pSender, _pThread);
+	if (ex)
+		ERROR("sendRTPOverTCP flush, ", ex.error())
+		pSender.reset();
 	return true;
 }
 
@@ -196,8 +229,15 @@ bool RTSPWriter::flush() {
 		_senders.pop_front();
 
 	// send senders
-	while (!_RTPsenders.empty() && sendRTP(_RTPsenders.front()))
-		_RTPsenders.pop_front();
+	if (_rtpOverTcp){
+		while (!_RTPOverTcpsenders.empty() && sendRTPOverTCP(_RTPOverTcpsenders.front()))
+			_RTPOverTcpsenders.pop_front();
+	}
+	else{
+		while (!_RTPsenders.empty() && sendRTP(_RTPsenders.front()))
+			_RTPsenders.pop_front();
+	}
+	
 		
 	return true;
 }
@@ -238,16 +278,16 @@ bool RTSPWriter::writeMedia(MediaType type,UInt32 time,PacketReader& packet,cons
 		case INIT: {
 			// TODO changer ça par un booléen!
 			if (time==DATA) {// one init by mediatype, we want here just init one time!
-				if(_pSocketAudioRTP) {
+				if (_pSocketAudioRTP || _rtpOverTcp) {
 					_pAudioRTP.reset(new RTP(_session.invoker.poolBuffers, "\x27\x83\xEE\x43")); // TODO : extract from audioSSRC
 					
 					RTPSender* pSender(createRTPSender(RTPSender::RtpType::AUDIO_RTCP,_portAudioRTCP));
 					_pAudioRTP->writeRTCP(pSender->packet, MediaContainer::AUDIO, 0); // RTCP first packets
 				}
-				if(_pSocketVideoRTP) {
+				if (_pSocketVideoRTP || _rtpOverTcp) {
 					_pVideoRTP.reset(new RTP(_session.invoker.poolBuffers, "\x4D\x7C\x7F\xFD")); // TODO : extract from videoSSRC
 				
-					RTPSender* pSender = createRTPSender(RTPSender::RtpType::VIDEO_RTCP,_portVideoRTCP);
+					RTPSender* pSender(createRTPSender(RTPSender::RtpType::VIDEO_RTCP,_portVideoRTCP));
 					_pVideoRTP->writeRTCP(pSender->packet, MediaContainer::VIDEO, 0);
 				}
 			}
@@ -256,12 +296,38 @@ bool RTSPWriter::writeMedia(MediaType type,UInt32 time,PacketReader& packet,cons
 		case AUDIO: {
 			if (_pAudioRTP) {
 				RTPSender* pSender(createRTPSender(RTPSender::RtpType::AUDIO_RTP,_portAudioRTP));
-				_pAudioRTP->write(pSender->packet,type,time,packet.current(), packet.available());
+				if (_rtpOverTcp){
+					int rtpPacketLen = 14 + packet.available();
+					char rtpOverTcpHeaders[4];
+					rtpOverTcpHeaders[0] = 0x24;
+					rtpOverTcpHeaders[1] = 0;// _videoRtpInterleavedValue;
+					rtpOverTcpHeaders[2] = rtpPacketLen >> 8;
+					rtpOverTcpHeaders[3] = rtpPacketLen & 0xff;
+					RTSPSender* pSender(createRTPOverTcpSender());
+					pSender->initSender();
+					pSender->getRtpOverTcpriter().packet.write(rtpOverTcpHeaders, 4);
+					_pVideoRTP->write(pSender->getRtpOverTcpriter().packet, type, time, packet.current(), packet.available());
+				}else			
+					_pAudioRTP->write(pSender->packet,type,time,packet.current(), packet.available());
 
 				// TODO : make the timer intelligent and configurable
 				if((time-_lastSRAudio) > 5000) {
-					pSender = createRTPSender(RTPSender::RtpType::AUDIO_RTCP,_portAudioRTCP);
-					_pAudioRTP->writeRTCP(pSender->packet, MediaContainer::AUDIO, time);
+					if (_rtpOverTcp){
+						int rtcpPacketLen = 28;
+						char rtpOverTcpHeaders[4];
+						rtpOverTcpHeaders[0] = 0x24;
+						rtpOverTcpHeaders[1] = 1;// _videoRtcpInterleavedValue;
+						rtpOverTcpHeaders[2] = rtcpPacketLen >> 8;
+						rtpOverTcpHeaders[3] = rtcpPacketLen & 0xff;
+						RTSPSender* pSender(createRTPOverTcpSender());
+						pSender->initSender();
+						pSender->getRtpOverTcpriter().packet.write(rtpOverTcpHeaders, 4);
+						_pVideoRTP->writeRTCP(pSender->getRtpOverTcpriter().packet, MediaContainer::VIDEO, time);
+					}
+					else{
+						pSender = createRTPSender(RTPSender::RtpType::AUDIO_RTCP, _portAudioRTCP);
+						_pAudioRTP->writeRTCP(pSender->packet, MediaContainer::AUDIO, time);
+					}
 					_lastSRAudio = time;
 				}
 			}
@@ -269,13 +335,68 @@ bool RTSPWriter::writeMedia(MediaType type,UInt32 time,PacketReader& packet,cons
 		}
 		case VIDEO: {
 			if (_pVideoRTP) {
-				RTPSender* pSender(createRTPSender(RTPSender::RtpType::VIDEO_RTP,_portVideoRTP));
-				_pVideoRTP->write(pSender->packet,type,time,packet.current(), packet.available());
+				SubstreamMap subReader(packet.current(), packet.available());
+				MPEGTS::ParseNAL(subReader, packet.current(), packet.available());
+				UInt8* pos = NULL;
+				UInt32 readed = subReader.readNextSub(pos, packet.available());
+				while (readed) {					
+					int length = readed;
+					int count = length / 600 + 1;
+					int left = length;
+					int bytesWritten = 0;
+				
+					for (int i = 0; i < count; i++){
+						int bytesToBeWrite = 0;
+						int rtpPacketLen = 0;
+						
+						bytesToBeWrite = length - bytesWritten > 600 ? 600 : (length - bytesWritten);
+						if (_rtpOverTcp){
+							if (count == 1)
+								rtpPacketLen = 12 + bytesToBeWrite;
+							else if (count > 1 && i == 0)
+								rtpPacketLen = 12 + bytesToBeWrite +1;
+							else if (count > 1)
+								rtpPacketLen = 12 + bytesToBeWrite + 2;
+							char rtpOverTcpHeaders[4];
+							rtpOverTcpHeaders[0] = 0x24;
+							rtpOverTcpHeaders[1] = 2;// _videoRtpInterleavedValue;
+							rtpOverTcpHeaders[2] = rtpPacketLen >> 8;
+							rtpOverTcpHeaders[3] = rtpPacketLen & 0xff;
+							RTSPSender* pSender(createRTPOverTcpSender());
+							pSender->initSender();
+						 	pSender->getRtpOverTcpriter().packet.write(rtpOverTcpHeaders, 4);
+							_pVideoRTP->write(pSender->getRtpOverTcpriter().packet, type, time, pos, bytesWritten, bytesToBeWrite, length);
+						}
+						else{
+							RTPSender* pSender(createRTPSender(RTPSender::RtpType::VIDEO_RTP, _portVideoRTP));
+							_pVideoRTP->write(pSender->packet, type, time, pos, bytesWritten, bytesToBeWrite, length);
+						}
+						bytesWritten += bytesToBeWrite;
+					}
+			
+					// Write NALU			
+					// Read raw data unit (Video : NALU)
+					readed = subReader.readNextSub(pos, packet.available());
+				}
 
 				// TODO : make the timer intelligent and configurable
 				if((time-_lastSRVideo) > 5000) {
-					pSender = createRTPSender(RTPSender::RtpType::VIDEO_RTCP,_portVideoRTCP);
-					_pVideoRTP->writeRTCP(pSender->packet, MediaContainer::VIDEO, time);
+					if (_rtpOverTcp){						
+						int rtcpPacketLen = 28;
+						char rtpOverTcpHeaders[4];
+						rtpOverTcpHeaders[0] = 0x24;
+						rtpOverTcpHeaders[1] = 3;// _videoRtcpInterleavedValue;
+						rtpOverTcpHeaders[2] = rtcpPacketLen >> 8;
+						rtpOverTcpHeaders[3] = rtcpPacketLen & 0xff;
+						RTSPSender* pSender(createRTPOverTcpSender());
+						pSender->initSender();
+						pSender->getRtpOverTcpriter().packet.write(rtpOverTcpHeaders, 4);
+						_pVideoRTP->writeRTCP(pSender->getRtpOverTcpriter().packet, MediaContainer::VIDEO, time);
+					}
+					else{
+						RTPSender* pSender = createRTPSender(RTPSender::RtpType::VIDEO_RTCP, _portVideoRTCP);
+						_pVideoRTP->writeRTCP(pSender->packet, MediaContainer::VIDEO, time);
+					}
 					_lastSRVideo = time;
 				}
 			}

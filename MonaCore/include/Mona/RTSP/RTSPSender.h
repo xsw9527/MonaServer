@@ -43,11 +43,11 @@ public:
 	DataWriter&		write(const char* code, HTTP::ContentType type = HTTP::CONTENT_ABSENT, const char* subType = NULL, const UInt8* data=NULL,UInt32 size=0);
 	DataWriter&		writeResponse(const char* code="200 OK",bool rawWithoutLength=false);
 	BinaryWriter&	writeRaw();
-
+	void initSender();
 	void writeError(const std::string& error,int code) {
 		writeError(code, error);
 	}
-
+	DataWriter& getRtpOverTcpriter() { return *_pWriter; }
 	const UInt8*	data() const { return _pWriter ? _pWriter->packet.data() : NULL; }
 	UInt32			size() const { return _pWriter ? _pWriter->packet.size() : 0; }
 

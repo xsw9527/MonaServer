@@ -65,8 +65,10 @@ public:
 
 	DataWriter&     writeRaw(const char* code);
 
-	void			initAudio(Exception& ex, UInt32 rtpPort, UInt32 rtcpPort, UInt32& srtpPort, UInt32& srtcpPort);
-	void			initVideo(Exception& ex, UInt32 rtpPort, UInt32 rtcpPort, UInt32& srtpPort, UInt32& srtcpPort);
+	void			initAudio(Exception& ex, UInt32 rtpPort, UInt32 rtcpPort, UInt32& srtpPort, UInt32& srtcpPort,\
+									int audioRtpInterleaved, int audioRtcpInterleaved, int rtpOverTcp = 0);
+	void			initVideo(Exception& ex, UInt32 rtpPort, UInt32 rtcpPort, UInt32& srtpPort, UInt32& srtcpPort, \
+									int audioRtpInterleaved, int audioRtcpInterleaved, int rtpOverTcp = 0);
 	
 	std::string		audioSSRC;
 	std::string		videoSSRC;
@@ -74,27 +76,29 @@ private:
 	bool			flush();
 
 	bool			writeMedia(MediaType type,UInt32 time,PacketReader& packet,const Parameters& properties);
-
+	RTSPSender*     createSender(bool isInternResponse);
+	RTSPSender*     createRTPOverTcpSender();
 	RTPSender*		createRTPSender(RTPSender::RtpType type, UInt16 port);
 	bool			sendRTP(std::shared_ptr<RTPSender>& pSender);
-	RTSPSender*     createSender(bool isInternResponse);
+	
 	bool			send(std::shared_ptr<RTSPSender>& pSender);
-
+	bool			sendRTPOverTCP(std::shared_ptr<RTSPSender>& pSender);
 	std::unique_ptr<RTP>						_pAudioRTP;
 	std::unique_ptr<RTP>						_pVideoRTP;
 	TCPSession&									_session;
 	PoolThread*									_pThread;
 	std::shared_ptr<RTSPSender>					_pResponse;
-	std::deque<std::shared_ptr<RTSPSender>>		_senders;
+	
 	bool										_isMain;
 	std::string									_lastError;
 	std::shared_ptr<RTSPPacket>					_pRequest;
 	UInt32										_requestCount;
 	std::shared_ptr<RTSPPacket>					_pLastRequest;
 	bool										_requesting;
-
-	
+	int                                         _rtpOverTcp;
+	std::deque<std::shared_ptr<RTSPSender>>		_senders;
 	std::deque<std::shared_ptr<RTPSender>>		_RTPsenders;
+	std::deque<std::shared_ptr<RTSPSender>>		_RTPOverTcpsenders;
 
 	
 	std::shared_ptr<UDPSocket>					_pSocketAudioRTP;
@@ -111,6 +115,11 @@ private:
 	UInt16										_sportAudioRTCP;
 	UInt16										_sportVideoRTP;
 	UInt16										_sportVideoRTCP;
+
+	UInt16                                      _videoRtpInterleavedValue;
+	UInt16                                      _videoRtcpInterleavedValue;
+	UInt16                                      _audioRtpInterleavedValue;
+	UInt16                                      _audioRtcpInterleavedValue;
 
 	UInt32										_lastSRAudio;	/// last Audio Sender Report (RTCP)
 	UInt32										_lastSRVideo;	/// last Video SR

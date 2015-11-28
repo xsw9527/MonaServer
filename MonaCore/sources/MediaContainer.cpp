@@ -116,7 +116,66 @@ void FLV::writeFrame(BinaryWriter& writer,UInt8 type,UInt32 time,const UInt8* da
 
 
 ////////////////////  RTP  /////////////////////////////
+void RTP::write(BinaryWriter& writer, UInt8 track, UInt32 time, const UInt8* data, UInt32 bytesWritten, UInt32 bytesToBeWrite,int total){
+	if (!data || !total)
+		return;
 
+	if (!_counter) { // First packet
+		if (track&VIDEO) {
+			MediaCodec::Video codec = MediaCodec::GetVideoType(*data);
+			if (codec != MediaCodec::VIDEO_H264)
+				WARN("Video codec for type ", codec, " is not supported yet")
+		}
+		else {
+			MediaCodec::Audio codec = MediaCodec::GetAudioType(*data);
+			if (codec != MediaCodec::AUDIO_MP3)
+				INFO("Audio Codec for type : ", codec, " is not supported yet")
+		}
+	}
+		_counter++;
+	
+	/// RTP Header
+	writer.write8(0x80);		// Version (2), padding and extension (0)
+	if (track&VIDEO) {
+
+		//printf("aggregated is %d\n", aggregated);
+		//if (bytesWritten + bytesToBeWrite == total)
+		//	writer.write8(0xE1);		// Marker and Payload type (97)
+		//else
+			writer.write8(0x61);
+		writer.write16(_counter);	// Sequence number
+		writer.write32(time * 90);	// Timestamp
+		writer.write(_SSRC);		// SSRC
+		
+		if (total != bytesToBeWrite){
+			writer.write8(0x1c + (data[0] & 0x60)); // RTP header (F|NRI|Type)
+			_octetCount++;
+			writer.write8(((((bytesWritten == 0 ? 1 : 0) << 1) + ((total - bytesWritten == bytesToBeWrite) ? 1 : 0)) << 6) | (data[0] & 0x1f));
+			if (bytesWritten == 0)
+				writer.write(data + bytesWritten+1, bytesToBeWrite-1);
+			else
+				writer.write(data + bytesWritten, bytesToBeWrite);
+		}else
+			writer.write(data + bytesWritten , bytesToBeWrite);
+		
+	
+			_octetCount += bytesToBeWrite ;
+
+	}
+	else if (total>1) { // Audio (mpeg4)
+
+		writer.write8(0x8e);	// Marker (1) and Payload type (14)
+		//writer.write8(0x62);	// Marker (0) and Payload type (98)
+		writer.write16(_counter);	// Sequence number
+		writer.write32(time * 22);	// Timestamp
+		writer.write(_SSRC);		// SSRC
+
+		writer.write32(0);
+		writer.write((data + 1), total - 1);
+		//printf("size is %d\n", size);
+		_octetCount += total + 3;
+	}
+}
 void RTP::write(BinaryWriter& writer,UInt8 track,UInt32 time,const UInt8* data,UInt32 size) {
 	if (!data || !size)
 		return;
@@ -150,8 +209,10 @@ void RTP::write(BinaryWriter& writer,UInt8 track,UInt32 time,const UInt8* data,U
 		writer.write16(_counter);	// Sequence number
 		writer.write32(time*90);	// Timestamp
 		writer.write(_SSRC);		// SSRC
-		if(aggregated) {
-			writer.write8(0x18 + ((*data==0x17)? 0x60 : 0x00)); // RTP header (F|NRI|Type)
+		if(aggregated) {			
+			//if bigger than maxmtu,Type should be 0x1c FU-A mode
+			//writer.write8(0x18 + ((*data==0x17)? 0x60 : 0x00)); // RTP header (F|NRI|Type)
+			writer.write8(0x1c + ((*data==0x17)? 0x60 : 0x00)); // RTP header (F|NRI|Type)
 			_octetCount++;
 		}
 
@@ -168,17 +229,20 @@ void RTP::write(BinaryWriter& writer,UInt8 track,UInt32 time,const UInt8* data,U
 			// Read raw data unit (Video : NALU)
 			readed = subReader.readNextSub(pos, size);
 		}
-	} else if(size>1) { // Audio (mpeg4)
-
-		writer.write8(0x8e);	// Marker (1) and Payload type (14)
-		//writer.write8(0x62);	// Marker (0) and Payload type (98)
+	} else if(size>7) { // Audio (AAC)
+		writer.write8(0xe0);	// Marker (1) and Payload type (96)
 		writer.write16(_counter);	// Sequence number
-		writer.write32(time*22);	// Timestamp
+		writer.write32(time*90);	// Timestamp
 		writer.write(_SSRC);		// SSRC
+		char auHeader[4];
+		auHeader[0] = 0;
+		auHeader[1] = 0x10;
+		auHeader[2] = ((size -2)& 0x1fe0) >> 5;
+		auHeader[3] = ((size -2)& 0x1f) << 3;
+		writer.write(auHeader,4);
+		writer.write((data + 2), size -2 );
+		_octetCount += size +4 -2;
 
-		writer.write32(0);
-		writer.write((data+1), size-1);
-		_octetCount += size+3;
 	}
 }
 
@@ -351,7 +415,10 @@ void MPEGTS::writeTS(BinaryWriter& writer, UInt32& available, UInt32 time, Subst
 		Logs::Dump("MPEGTS wrong frame", subReader.originalData(), subReader.originalSize());
 		return;
 	}
-
+    //AAC packets should bigger than 3 bytes
+	if (type == AUDIO && first && (available < 3))
+		return;
+	//	return;
 	// sync byte
 	writer.write8(0x47);
 
@@ -443,8 +510,8 @@ void MPEGTS::writeTS(BinaryWriter& writer, UInt32& available, UInt32 time, Subst
 				writer.write8(0x09);
 				writer.write8(isMetadata? 0x10 : 0x30);
 			} else {
-				writer.write32(0xfff15040);
-				writer.write16(((toWrite+7) << 5) + 0x1F);
+				writer.write32(0xfff14c40);
+				writer.write16(((available + 7) << 5) + 0x1F);
 				writer.write8(0xfc);
 			}
 		}
